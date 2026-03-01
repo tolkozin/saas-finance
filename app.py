@@ -554,8 +554,8 @@ def run_model(sens_params=None):
     conv_p = np.array([phase_cfg[get_phase(m)]["cp"] for m in months])
     df["New Trials"] = df["Installs"].values * conv_t
 
-    # Trial delay (fixed: any trial > 0 days = 1 month delay)
-    trial_delay = 1 if trial_days > 0 else 0
+    # Trial delay: only full months count (3-day trial = 0 delay, 30-day = 1 month)
+    trial_delay = trial_days // 30
     paid_new = df["New Trials"].values * conv_p
     if trial_delay > 0:
         paid_new = np.concatenate([np.zeros(trial_delay), paid_new[:N - trial_delay]])
