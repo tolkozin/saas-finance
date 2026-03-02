@@ -763,11 +763,15 @@ def run_model(sens_params=None):
     df["Misc Costs"] = df["Product Phase"].map({1: phase_cfg[1]["misc"], 2: phase_cfg[2]["misc"], 3: phase_cfg[3]["misc"]})
     df["Total Expenses"] = df["COGS"] + df["Marketing"] + df["Salaries"] + df["Misc Costs"]
 
-    df["Gross Profit"] = df["Recognized Revenue"] - df["COGS"] - df["Total Commissions"]
+    # P&L on cash basis (consistent with Total Gross Revenue display)
+    df["Gross Profit"] = df["Total Gross Revenue"] - df["COGS"] - df["Total Commissions"]
     df["EBITDA"] = df["Gross Profit"] - df["Marketing"] - df["Salaries"] - df["Misc Costs"]
     df["Corporate Tax"] = df["EBITDA"].apply(lambda x: x * (corporate_tax / 100.0) if x > 0 else 0)
     df["Net Profit"] = df["EBITDA"] - df["Corporate Tax"]
     df["Net Cash Flow"] = df["Total Gross Revenue"] - df["Total Commissions"] - df["Total Expenses"] - df["Corporate Tax"]
+    # Accrual-basis P&L (recognized revenue = MRR, for SaaS reporting)
+    df["Recognized Gross Profit"] = df["Recognized Revenue"] - df["COGS"] - df["Total Commissions"]
+    df["Recognized EBITDA"] = df["Recognized Gross Profit"] - df["Marketing"] - df["Salaries"] - df["Misc Costs"]
 
     # Cash Balance with per-phase investments
     total_investment = phase_cfg[1]["inv"] + phase_cfg[2]["inv"] + phase_cfg[3]["inv"]
@@ -814,7 +818,7 @@ def run_model(sens_params=None):
     # CRR (Customer Retention Rate)
     df["CRR %"] = (1 - df["Blended Churn"]) * 100
 
-    df["Gross Margin %"] = df["Gross Profit"] / df["Recognized Revenue"].replace(0, np.nan)
+    df["Gross Margin %"] = df["Gross Profit"] / df["Total Gross Revenue"].replace(0, np.nan)
     df["LTV"] = (df["ARPU"] * df["Gross Margin %"]) / pd.Series(blended_churn).replace(0, np.nan)
     df["LTV/CAC"] = df["LTV"] / df["Blended CAC"].replace(0, np.nan)
     df["MER"] = df["Total Gross Revenue"] / df["Marketing"].replace(0, np.nan)
@@ -828,11 +832,12 @@ def run_model(sens_params=None):
     df["ROAS"] = df["Total Gross Revenue"] / df["Ad Budget"].replace(0, np.nan)
     df["Cumulative ROAS"] = df["Cumulative Revenue"] / df["Cumulative Ad Spend"].replace(0, np.nan)
 
-    # NRR (Net Revenue Retention) — revenue from existing users / previous MRR
+    # NRR (Net Revenue Retention) — MRR from existing cohorts / previous total MRR
     nrr = np.full(N, np.nan)
     for j in range(1, N):
         if total_mrr_series[j - 1] > 0:
-            existing_mrr = total_mrr_series[j] - new_mrr_arr[j] * rf + expansion_mrr[j] - contraction_mrr[j]
+            # Current MRR minus new MRR = revenue retained from previous period's users
+            existing_mrr = total_mrr_series[j] - new_mrr_arr[j] * rf
             nrr[j] = (existing_mrr / total_mrr_series[j - 1]) * 100
     df["NRR %"] = nrr
 
@@ -1011,6 +1016,34 @@ row2[4].metric("Burn Rate", f"${burn_val:,.0f}/mo",
 row2[5].metric("Runway", f"{runway_val:,.0f} мес." if runway_val else "∞",
     help="Сколько месяцев до конца денег при текущем Burn Rate.")
 
+# ===================== COST BREAKDOWN =====================
+st.markdown("---")
+st.subheader("Revenue → Net Profit Breakdown")
+
+_total_rev = f_df["Total Gross Revenue"].sum()
+_total_cogs = f_df["COGS"].sum()
+_total_comm = f_df["Total Commissions"].sum()
+_total_marketing = f_df["Marketing"].sum()
+_total_sal = f_df["Salaries"].sum()
+_total_misc = f_df["Misc Costs"].sum()
+_total_tax = f_df["Corporate Tax"].sum()
+_total_net = f_df["Net Profit"].sum()
+
+_breakdown_cols = st.columns(8)
+_breakdown_cols[0].metric("Revenue", f"${_total_rev:,.0f}")
+_breakdown_cols[1].metric("- COGS", f"${_total_cogs:,.0f}")
+_breakdown_cols[2].metric("- Commissions", f"${_total_comm:,.0f}")
+_breakdown_cols[3].metric("- Marketing", f"${_total_marketing:,.0f}")
+_breakdown_cols[4].metric("- Salaries", f"${_total_sal:,.0f}")
+_breakdown_cols[5].metric("- Misc", f"${_total_misc:,.0f}")
+_breakdown_cols[6].metric("- Tax", f"${_total_tax:,.0f}")
+_breakdown_cols[7].metric("= Net Profit", f"${_total_net:,.0f}")
+
+# Deferred Revenue info
+_deferred = f_df["Total Gross Revenue"].sum() - f_df["Recognized Revenue"].sum()
+if abs(_deferred) > 100:
+    st.caption(f"Deferred Revenue (annual subs paid upfront but not yet earned): ${_deferred:,.0f}")
+
 # ===================== EXECUTIVE DASHBOARD =====================
 st.markdown("---")
 st.header("Executive Dashboard")
@@ -1150,6 +1183,7 @@ with tab1:
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("MRR by Subscription Plan")
+        st.caption("Ежемесячная повторяющаяся выручка (MRR) в разбивке по типам подписок. Показывает вклад каждого плана в общий MRR и помогает понять зависимость от конкретного типа подписки.")
         fig1 = go.Figure()
         for col, name in [("MRR Weekly", "Weekly"), ("MRR Monthly", "Monthly"), ("MRR Annual", "Annual")]:
             fig1.add_trace(go.Scatter(x=f_df["Month"], y=f_df[col], mode="lines", stackgroup="one", name=f"{name} (Base)"))
@@ -1162,6 +1196,7 @@ with tab1:
 
     with c2:
         st.subheader("Cash Balance")
+        st.caption("Остаток денег на счёте с учётом инвестиций, доходов и всех расходов. Красная линия на нуле — если столбцы опускаются ниже, значит деньги закончились.")
         fig2 = go.Figure()
         fig2.add_trace(go.Bar(x=f_df["Month"], y=f_df["Cash Balance"], name="Base"))
         fig2.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["Cash Balance"], mode="lines", line=dict(dash="dot", color="red"), name="Pessimistic"))
@@ -1175,6 +1210,7 @@ with tab1:
     c3, c4 = st.columns(2)
     with c3:
         st.subheader("Gross vs Net Revenue")
+        st.caption("Сравнение валовой выручки (до вычета комиссий) и чистой выручки (после вычета комиссий App Store, Web, банков). Разница между ними — это комиссии платёжных систем.")
         fig4 = go.Figure()
         fig4.add_trace(go.Bar(x=f_df["Month"], y=f_df["Gross Revenue Web"], name="Gross Web"))
         fig4.add_trace(go.Bar(x=f_df["Month"], y=f_df["Gross Revenue Store"], name="Gross Store"))
@@ -1187,6 +1223,7 @@ with tab1:
 
     with c4:
         st.subheader("Churn Rates by Subscription Type")
+        st.caption("Процент оттока подписчиков по каждому типу плана. Weekly и Monthly — ежемесячный отток, Annual — годовая доля неперподписок. Учитывает множитель фазы.")
         fig6 = go.Figure()
         for col in ["Weekly Churn %", "Monthly Churn %", "Annual Non-Renewal %"]:
             fig6.add_trace(go.Scatter(x=f_df["Month"], y=f_df[col], mode="lines", name=f"{col} (Base)"))
@@ -1200,6 +1237,7 @@ with tab1:
     c3b, c4b = st.columns(2)
     with c3b:
         st.subheader("Deferred Revenue")
+        st.caption("Отложенная выручка — деньги, полученные от annual-подписчиков авансом, но ещё не признанные как выручка. Растёт при увеличении доли годовых подписок.")
         fig_def = go.Figure()
         fig_def.add_trace(go.Scatter(x=f_df["Month"], y=f_df["Deferred Revenue"], mode="lines+markers", name="Deferred Revenue (Base)", fill="tozeroy"))
         fig_def.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["Deferred Revenue"], mode="lines", line=dict(dash="dot"), name="Pess", visible="legendonly"))
@@ -1210,6 +1248,7 @@ with tab1:
 
     with c4b:
         st.subheader("Active Users")
+        st.caption("Общее количество активных подписчиков (все планы). Маркеры показывают достижение ключевых отметок (1K, 10K, 100K пользователей).")
         fig_users = go.Figure()
         fig_users.add_trace(go.Scatter(x=f_df["Month"], y=f_df["Total Active Users"], mode="lines", name="Users (Base)"))
         fig_users.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["Total Active Users"], mode="lines", line=dict(dash="dot", color="red"), name="Users (Pess)"))
@@ -1223,6 +1262,7 @@ with tab2:
     c5, c6 = st.columns(2)
     with c5:
         st.subheader("LTV vs CAC")
+        st.caption("Пожизненная ценность клиента (LTV) vs стоимость привлечения (CAC). Когда LTV выше CAC — юнит-экономика положительная. Формула LTV = ARPU × Gross Margin / Churn.")
         fig3 = go.Figure()
         for col in ["LTV", "Paid CAC", "Organic CAC", "Blended CAC"]:
             fig3.add_trace(go.Scatter(x=f_df["Month"], y=f_df[col], mode="lines", name=f"{col} (Base)"))
@@ -1234,6 +1274,7 @@ with tab2:
 
     with c6:
         st.subheader("Payback Period")
+        st.caption("Срок окупаемости одного пользователя в месяцах. Показывает через сколько месяцев выручка от подписчика покроет затраты на его привлечение. Формула: CAC / (ARPU × Gross Margin).")
         fig5 = go.Figure()
         fig5.add_trace(go.Scatter(x=f_df["Month"], y=f_df["Payback Period (Months)"], mode="lines", name="Base"))
         fig5.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["Payback Period (Months)"], mode="lines", line=dict(dash="dot"), name="Pessimistic"))
@@ -1245,6 +1286,7 @@ with tab2:
     c7, c8 = st.columns(2)
     with c7:
         st.subheader("MER & ROAS")
+        st.caption("Эффективность маркетинга. MER = Выручка / Весь маркетинг (включая органик). ROAS = Выручка / Рекламный бюджет (только платная реклама). Значение >1 означает, что реклама приносит больше, чем стоит.")
         fig8 = go.Figure()
         fig8.add_trace(go.Scatter(x=f_df["Month"], y=f_df["MER"], mode="lines", name="MER (Base)"))
         fig8.add_trace(go.Scatter(x=f_df["Month"], y=f_df["ROAS"], mode="lines", name="ROAS (Base)"))
@@ -1258,6 +1300,7 @@ with tab2:
 
     with c8:
         st.subheader("MRR Movement Waterfall")
+        st.caption("Из чего складывается изменение MRR за весь период. New MRR — от новых подписчиков, Expansion — апгрейды, Contraction — даунгрейды, Churned — ушедшие. Итог — Net New MRR.")
         fig_mrr_w = go.Figure(go.Waterfall(
             name="MRR Movement", orientation="v",
             measure=["relative", "relative", "relative", "relative", "total"],
@@ -1272,6 +1315,7 @@ with tab2:
 
     # Unit Economics Over Time (combined)
     st.subheader("Unit Economics Over Time")
+    st.caption("Ключевые юнит-метрики на одном графике: ARPU (доход с пользователя), CAC (стоимость привлечения), LTV (пожизненная ценность) и Payback (срок окупаемости, правая ось). Помогает оценить здоровье юнит-экономики в динамике.")
     fig_ue = go.Figure()
     fig_ue.add_trace(go.Scatter(x=f_df["Month"], y=f_df["ARPU"], mode="lines", name="ARPU"))
     fig_ue.add_trace(go.Scatter(x=f_df["Month"], y=f_df["Blended CAC"], mode="lines", name="Blended CAC"))
@@ -1291,11 +1335,12 @@ with tab3:
     c9, c10 = st.columns(2)
     with c9:
         st.subheader("P&L Waterfall")
+        st.caption("Каскадная диаграмма отчёта о прибылях и убытках. Показывает как из выручки последовательно вычитаются расходы (COGS, маркетинг, зарплаты, комиссии, налоги) и получается чистая прибыль.")
         fig7 = go.Figure(go.Waterfall(
             name="P&L", orientation="v",
             measure=["relative", "relative", "relative", "relative", "relative", "total"],
             x=["Revenue", "COGS", "Marketing", "Salaries & Misc", "Commissions & Tax", "Net Profit"],
-            y=[f_df["Recognized Revenue"].sum(), -f_df["COGS"].sum(), -f_df["Marketing"].sum(),
+            y=[f_df["Total Gross Revenue"].sum(), -f_df["COGS"].sum(), -f_df["Marketing"].sum(),
                -(f_df["Salaries"].sum() + f_df["Misc Costs"].sum()),
                -(f_df["Total Commissions"].sum() + f_df["Corporate Tax"].sum()),
                f_df["Net Profit"].sum()],
@@ -1306,6 +1351,7 @@ with tab3:
 
     with c10:
         st.subheader("Scenario Comparison")
+        st.caption("Сравнение итоговых показателей по трём сценариям (пессимистичный, базовый, оптимистичный). Переключайте метрики через легенду.")
         metrics_names = ["Net Profit", "Total Revenue", "End MRR", "End Users"]
         scenario_data = []
         for label, sdf in [("Pessimistic", f_pess), ("Base", f_df), ("Optimistic", f_opt)]:
@@ -1330,6 +1376,7 @@ with tab3:
     c11, c12 = st.columns(2)
     with c11:
         st.subheader("Cumulative Net Profit")
+        st.caption("Накопленная чистая прибыль нарастающим итогом. Момент пересечения нуля — точка кумулятивной безубыточности. Показывает когда бизнес суммарно выходит в плюс.")
         fig_roi = go.Figure()
         fig_roi.add_trace(go.Scatter(x=f_df["Month"], y=f_df["Cumulative Net Profit"], mode="lines", name="Base"))
         fig_roi.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["Cumulative Net Profit"], mode="lines", line=dict(dash="dot", color="red"), name="Pessimistic"))
@@ -1342,6 +1389,7 @@ with tab3:
 
     with c12:
         st.subheader("NRR & Quick Ratio")
+        st.caption("NRR (левая ось) — сколько % выручки удерживается от существующих пользователей. >100% = рост без новых клиентов. Quick Ratio (правая ось) — отношение роста MRR к потерям. >4 = здоровый рост.")
         fig_nrr = go.Figure()
         fig_nrr.add_trace(go.Scatter(x=f_df["Month"], y=f_df["NRR %"], mode="lines", name="NRR % (Base)"))
         fig_nrr.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["NRR %"], mode="lines", line=dict(dash="dot"), name="NRR % (Pess)", visible="legendonly"))
@@ -1359,6 +1407,7 @@ with tab3:
 with tab4:
     # Cohort Retention Heatmap
     st.subheader("Cohort Retention Heatmap")
+    st.caption("Тепловая карта удержания когорт. Строки — когорты по месяцу привлечения, столбцы — текущий месяц. Цвет показывает % пользователей, оставшихся от начального размера когорты. Зелёный = высокое удержание, красный = сильный отток.")
     # Show every Nth cohort to keep heatmap readable
     max_cohorts = min(total_months, 30)
     step = max(1, total_months // max_cohorts)
@@ -1401,6 +1450,7 @@ with tab4:
     c_dd1, c_dd2 = st.columns(2)
     with c_dd1:
         st.subheader("MRR Movement Over Time")
+        st.caption("Помесячная динамика изменений MRR. Зелёные столбцы — новый MRR и апгрейды. Красные — отток и даунгрейды. Чёрная линия — чистый прирост MRR. Если линия ниже нуля — MRR сокращается.")
         fig_mrr_t = go.Figure()
         fig_mrr_t.add_trace(go.Bar(x=f_df["Month"], y=f_df["New MRR"], name="New MRR", marker_color="green"))
         fig_mrr_t.add_trace(go.Bar(x=f_df["Month"], y=f_df["Expansion MRR"], name="Expansion MRR", marker_color="lightgreen"))
@@ -1413,6 +1463,7 @@ with tab4:
 
     with c_dd2:
         st.subheader("ROI % Over Time")
+        st.caption("Кумулятивный ROI — возврат на инвестиции нарастающим итогом. Формула: (Выручка - Все расходы - Инвестиции) / Инвестиции × 100%. Когда линия пересекает 0% — инвестиции начинают окупаться.")
         fig_roi_t = go.Figure()
         fig_roi_t.add_trace(go.Scatter(x=f_df["Month"], y=f_df["ROI %"], mode="lines", name="ROI % (Base)"))
         fig_roi_t.add_trace(go.Scatter(x=f_pess["Month"], y=f_pess["ROI %"], mode="lines", line=dict(dash="dot", color="red"), name="ROI % (Pess)"))
@@ -1426,6 +1477,7 @@ with tab4:
 if mc_enabled:
     st.markdown("---")
     st.header("Monte Carlo Simulation")
+    st.caption("Моделирование случайных отклонений параметров (конверсия, отток, CPI, органика) для оценки диапазона возможных результатов. Каждая итерация — случайный сценарий. Гистограммы показывают распределение итогов.")
     np.random.seed(42)
     mc_results = []
     mc_var = mc_variance / 100.0
@@ -1479,50 +1531,109 @@ st.header("Financial Reports")
 rep_tab1, rep_tab2, rep_tab3, rep_tab4, rep_tab5 = st.tabs(
     ["P&L", "Cash Flow", "Balance Sheet", "Key Metrics", "Summary & Scenarios"])
 
-pnl_cols = ["Month", "Product Phase", "Recognized Revenue", "COGS", "Gross Profit",
+pnl_cols = ["Month", "Product Phase", "Total Gross Revenue", "Recognized Revenue", "COGS", "Gross Profit",
             "Marketing", "Salaries", "Misc Costs", "Total Commissions", "EBITDA",
             "Corporate Tax", "Net Profit"]
+pnl_rename = {
+    "Month": "Месяц",
+    "Product Phase": "Фаза",
+    "Total Gross Revenue": "Валовая выручка (cash)",
+    "Recognized Revenue": "Признанная выручка (MRR)",
+    "COGS": "COGS (себест. на юзера)",
+    "Gross Profit": "Валовая прибыль (выручка-COGS-комиссии)",
+    "Marketing": "Маркетинг (реклама+органик)",
+    "Salaries": "Зарплаты",
+    "Misc Costs": "Прочие расходы",
+    "Total Commissions": "Комиссии (Store+Web+банк)",
+    "EBITDA": "EBITDA (до налогов)",
+    "Corporate Tax": "Налог на прибыль",
+    "Net Profit": "Чистая прибыль",
+}
 cf_cols = ["Month", "Product Phase", "Total Gross Revenue", "Total Commissions",
            "Total Expenses", "Corporate Tax", "Net Cash Flow", "Cash Balance"]
+cf_rename = {
+    "Month": "Месяц",
+    "Product Phase": "Фаза",
+    "Total Gross Revenue": "Валовая выручка (cash)",
+    "Total Commissions": "Комиссии (Store+Web+банк)",
+    "Total Expenses": "Все расходы (COGS+маркетинг+зп+прочие)",
+    "Corporate Tax": "Налог на прибыль",
+    "Net Cash Flow": "Чистый ден. поток (приход-расход)",
+    "Cash Balance": "Остаток на счёте",
+}
 
 with rep_tab1:
     st.subheader("Profit & Loss Statement")
+    st.caption("Отчёт о прибылях и убытках. Валовая выручка — фактически полученные деньги. Признанная выручка (MRR) — помесячная. Чистая прибыль = EBITDA - налоги.")
     pnl_sc1, pnl_sc2, pnl_sc3 = st.tabs(["Base", "Pessimistic", "Optimistic"])
     with pnl_sc1:
-        st.dataframe(f_df[pnl_cols], use_container_width=True)
+        st.dataframe(f_df[pnl_cols].rename(columns=pnl_rename), use_container_width=True)
     with pnl_sc2:
-        st.dataframe(f_pess[pnl_cols], use_container_width=True)
+        st.dataframe(f_pess[pnl_cols].rename(columns=pnl_rename), use_container_width=True)
     with pnl_sc3:
-        st.dataframe(f_opt[pnl_cols], use_container_width=True)
+        st.dataframe(f_opt[pnl_cols].rename(columns=pnl_rename), use_container_width=True)
 
 with rep_tab2:
     st.subheader("Cash Flow Statement")
+    st.caption("Отчёт о движении денежных средств. Чистый денежный поток = Выручка - Комиссии - Расходы - Налоги. Остаток на счёте учитывает инвестиции и накопленный поток.")
     cf_sc1, cf_sc2, cf_sc3 = st.tabs(["Base", "Pessimistic", "Optimistic"])
     with cf_sc1:
-        st.dataframe(f_df[cf_cols], use_container_width=True)
+        st.dataframe(f_df[cf_cols].rename(columns=cf_rename), use_container_width=True)
     with cf_sc2:
-        st.dataframe(f_pess[cf_cols], use_container_width=True)
+        st.dataframe(f_pess[cf_cols].rename(columns=cf_rename), use_container_width=True)
     with cf_sc3:
-        st.dataframe(f_opt[cf_cols], use_container_width=True)
+        st.dataframe(f_opt[cf_cols].rename(columns=cf_rename), use_container_width=True)
 
 with rep_tab3:
     st.subheader("Balance Sheet (Simplified)")
-    st.dataframe(f_df[["Month", "Product Phase", "Cash Balance", "Deferred Revenue",
-                        "Cumulative Net Profit"]], use_container_width=True)
+    st.caption("Упрощённый баланс. Остаток на счёте — живые деньги. Отложенная выручка — авансы от annual-подписчиков. Кумулятивная прибыль — суммарный результат с начала.")
+    bs_cols = ["Month", "Product Phase", "Cash Balance", "Deferred Revenue", "Cumulative Net Profit"]
+    bs_rename = {
+        "Month": "Месяц",
+        "Product Phase": "Фаза",
+        "Cash Balance": "Остаток на счёте",
+        "Deferred Revenue": "Отложенная выручка (авансы annual)",
+        "Cumulative Net Profit": "Кумулятивная прибыль",
+    }
+    st.dataframe(f_df[bs_cols].rename(columns=bs_rename), use_container_width=True)
 
 with rep_tab4:
     st.subheader("Key Metrics")
+    st.caption("Полная таблица ключевых SaaS-метрик по месяцам. Используйте для детального анализа юнит-экономики, эффективности маркетинга и финансового здоровья.")
     metrics_cols = ["Month", "Product Phase", "Total Active Users", "ARPU", "Blended Churn", "CRR %",
                     "LTV", "Paid CAC", "Organic CAC", "Blended CAC", "LTV/CAC", "MER", "ROAS",
                     "Payback Period (Months)", "ROI %", "NRR %", "Quick Ratio",
                     "Burn Rate", "Runway (Months)", "CAE", "Revenue per Install"]
+    km_rename = {
+        "Month": "Месяц",
+        "Product Phase": "Фаза",
+        "Total Active Users": "Активные юзеры",
+        "ARPU": "ARPU (доход/юзер/мес)",
+        "Blended Churn": "Отток (средневзвеш.)",
+        "CRR %": "CRR % (удержание)",
+        "LTV": "LTV (ценность клиента)",
+        "Paid CAC": "Paid CAC (стоимость из рекламы)",
+        "Organic CAC": "Organic CAC (стоимость из органики)",
+        "Blended CAC": "Blended CAC (общая стоимость)",
+        "LTV/CAC": "LTV/CAC (>3x хорошо)",
+        "MER": "MER (выручка/маркетинг)",
+        "ROAS": "ROAS (выручка/реклама)",
+        "Payback Period (Months)": "Payback (мес. окупаемости)",
+        "ROI %": "ROI % (возврат инвестиций)",
+        "NRR %": "NRR % (удержание выручки)",
+        "Quick Ratio": "Quick Ratio (рост/потери MRR)",
+        "Burn Rate": "Burn Rate (расход/мес при убытке)",
+        "Runway (Months)": "Runway (мес. до конца денег)",
+        "CAE": "CAE (эффект. привлечения)",
+        "Revenue per Install": "Доход на установку",
+    }
     km_sc1, km_sc2, km_sc3 = st.tabs(["Base", "Pessimistic", "Optimistic"])
     with km_sc1:
-        st.dataframe(f_df[metrics_cols], use_container_width=True)
+        st.dataframe(f_df[metrics_cols].rename(columns=km_rename), use_container_width=True)
     with km_sc2:
-        st.dataframe(f_pess[metrics_cols], use_container_width=True)
+        st.dataframe(f_pess[metrics_cols].rename(columns=km_rename), use_container_width=True)
     with km_sc3:
-        st.dataframe(f_opt[metrics_cols], use_container_width=True)
+        st.dataframe(f_opt[metrics_cols].rename(columns=km_rename), use_container_width=True)
 
 with rep_tab5:
     # Helper to build phase summary
@@ -1542,13 +1653,16 @@ with rep_tab5:
             Avg_ARPU=("ARPU", "mean"),
             Avg_LTV_CAC=("LTV/CAC", "mean"),
         ).reset_index()
-        ps.columns = ["Phase", "Months", "Revenue", "Marketing", "Salaries",
-                       "Misc", "COGS", "Commissions",
-                       "Net Profit", "End Users", "New Users", "End MRR",
-                       "Avg ARPU", "Avg LTV/CAC"]
+        ps.columns = [
+            "Фаза", "Месяцев", "Выручка (cash)", "Маркетинг", "Зарплаты",
+            "Прочие", "COGS (себест.)", "Комиссии (Store+Web+банк)",
+            "Чистая прибыль", "Юзеры на конец", "Новые юзеры", "MRR на конец",
+            "Сред. ARPU", "Сред. LTV/CAC",
+        ]
         return ps
 
     st.subheader("Summary by Phase")
+    st.caption("Итоги по каждой фазе продукта: сколько заработано, потрачено и какие юнит-метрики в среднем.")
     ps_sc1, ps_sc2, ps_sc3 = st.tabs(["Base", "Pessimistic", "Optimistic"])
     with ps_sc1:
         st.dataframe(build_phase_summary(f_df), use_container_width=True)
@@ -1559,6 +1673,7 @@ with rep_tab5:
 
     # Scenario comparison table
     st.subheader("Scenario Comparison Table")
+    st.caption("Сводная таблица итогов по трём сценариям. Пессимистичный: конверсия ниже, отток выше, CPI дороже. Оптимистичный — наоборот.")
     sc_table = pd.DataFrame({
         "Metric": ["Total Revenue", "Net Profit", "End MRR", "End Users", "Cumulative ROI %",
                     "Break-Even Month", "Cumulative BE", "Runway Out"],
@@ -1597,6 +1712,7 @@ with rep_tab5:
 
     # Milestone comparison across scenarios
     st.subheader("Milestone Comparison")
+    st.caption("Сравнение ключевых вех (безубыточность, окупаемость, пороги пользователей/MRR) по трём сценариям. '—' означает что веха не достигнута в рамках прогнозного периода.")
     ms_compare = pd.DataFrame({
         "Milestone": ["Break-Even (P&L)", "Cumulative Break-Even", "Cash Flow Positive",
                        "Investment Payback", "1K Users", "10K Users", "MRR $10K", "MRR $100K", "Runway Out"],
